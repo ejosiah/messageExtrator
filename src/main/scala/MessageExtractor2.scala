@@ -37,7 +37,7 @@ object MessageExtractor2 extends App{
     System.exit(2)
   }
 
-  val startTagPattern = "^<([a-zA-z0-9]+).*>".r
+  val startTagPattern = "<([a-zA-z0-9]+).*>".r
   val contentPattern = "<([a-zA-z0-9]+).*>(.+)</([a-zA-z0-9]+)>".r
   val expressionPattern = "(@[a-zA-Z0-9.]+(\\(.*\\))*)".r
 
@@ -61,6 +61,23 @@ object MessageExtractor2 extends App{
     fullMatch.substring(startIndex, endIndex)
   }
 
+  def extractChildren(line: String, acc: List[String] = Nil): List[String] = {
+    if(line.isEmpty) acc
+    else {
+      val startIndex = line.indexOf("<")
+      if (startIndex == -1) {
+        acc :+ line
+      }else {
+        val tag = startTagPattern.findFirstMatchIn(line).get.group(1)
+        val endIndex = line.indexOf(s"/$tag>") + tag.length() + 2
+        val head = line.substring(startIndex, endIndex)
+        val tail = line.replace(head, "")
+        extractChildren(tail, acc :+ head)
+      }
+    }
+
+  }
+
   def processLine(line: String, pkey: String): Option[((String, String), String)] = {
     val m1 = contentPattern.findFirstMatchIn(line.trim())
 
@@ -73,6 +90,9 @@ object MessageExtractor2 extends App{
           tagSequence = tagSequence + (tag.value -> sequence())
         }
         var content = extractContent(tag.value, line)
+        val children = extractChildren(content)
+
+
         val expressions =  (for( m <- expressionPattern.findAllMatchIn(content)) yield {
           val expression = m.group(1)
           content = content.replace(expression, s"{${substitutionSeq()}}")
@@ -80,14 +100,10 @@ object MessageExtractor2 extends App{
         }).toSeq
 
 
+
         val key = s"$rootKey.${tag.value}.${tagSequence(tag.value)()}"
-        Some(key -> content,
-          if(expressions.isEmpty) {
-            tag.render(s"""@messages("$key")""")
-          }else {
-            tag.render(s"""@messages("$key", ${ expressions.mkString(", ") })""")
-          }
-        )
+        val args = expressions.foldLeft("")((acc, expression) => s"$acc, $expression")
+        Some(key -> content, tag.render(s"""@messages("$key"$args)"""))
       case _ => None
     }
 
