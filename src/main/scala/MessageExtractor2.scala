@@ -1,4 +1,4 @@
-import MessagesExtractor.{args, currentTag, output, path, rootKey, sequence, tagSequence}
+import MessagesExtractor.{args, currentTag, messages, output, outputPrefix, path, rootKey, sequence, tagSequence}
 
 import java.util.Scanner
 import java.nio.file.Path
@@ -53,36 +53,12 @@ object MessageExtractor2 extends App{
     }
   }
 
-  val processMessage: (String, () => Int, String, List[String]) => List[String] = (parentKey: String, seq: () => Int, message: String, content: List[String]) => {
-    val substitutionSeq = sequence()
-    var newMessage = message
-    val expressions =  for( m <- expressionPattern.findAllMatchIn(message)) yield {
-      val expression = m.group(1)
-      newMessage = newMessage.replace(expression, s"{$substitutionSeq()}")
-      expression
-    }
-    val key = s"$parentKey.${seq()}"
-    messages = messages + (key -> newMessage)
-    var newContent = content
-    if(expressions.nonEmpty) {
-      newContent = content :+ s"""messages($key, ${ expressions.mkString(", ") } )"""
-    }else {
-      newContent= content :+ s"""messages($key)"""
-    }
-    newContent
-  }
+  def extractContent(tag: String, line: String): String = {
+    val fullMatch = line
+    val startIndex = fullMatch.indexOf(s">") + 1
+    val endIndex = fullMatch.indexOf(s"</$tag")
 
-  def processContent(key: String, seq: () => Int, tokenizer: Scanner, tokens: String, content: List[String]): List[String] = {
-    if(tokenizer.hasNext()) {
-      tokenizer.next() match {
-        case "<" =>
-          processContent(key, seq, tokenizer, "<", processMessage(key, seq, tokens, content))
-        case token =>
-          processContent(key, seq, tokenizer, tokens + token, content)
-      }
-    } else {
-      processMessage(key, seq, tokens, content)
-    }
+    fullMatch.substring(startIndex, endIndex)
   }
 
   def processLine(line: String, pkey: String): Option[((String, String), String)] = {
@@ -91,12 +67,27 @@ object MessageExtractor2 extends App{
     m1 match {
       case Some(m) =>
         val tag = Tag(m.group(1), line)
+        val substitutionSeq = sequence()
+
         if(!tagSequence.contains(tag.value)) {
           tagSequence = tagSequence + (tag.value -> sequence())
         }
-        val content = m.group(2)
+        var content = extractContent(tag.value, line)
+        val expressions =  (for( m <- expressionPattern.findAllMatchIn(content)) yield {
+          val expression = m.group(1)
+          content = content.replace(expression, s"{${substitutionSeq()}}")
+          expression.replace("@", "")
+        }).toSeq
+
+
         val key = s"$rootKey.${tag.value}.${tagSequence(tag.value)()}"
-        Some(key -> content, tag.render(s"""@messages("$key")"""))
+        Some(key -> content,
+          if(expressions.isEmpty) {
+            tag.render(s"""@messages("$key")""")
+          }else {
+            tag.render(s"""@messages("$key", ${ expressions.mkString(", ") })""")
+          }
+        )
       case _ => None
     }
 
@@ -113,17 +104,27 @@ object MessageExtractor2 extends App{
     val m1 = startTagPattern.findFirstMatchIn(line.trim)
 
     if(m1.isDefined) {
-      processLine(line, "").foreach {
-        case (message, output) =>
+      processLine(line, "") match {
+        case Some((message, output)) =>
           messages = messages + message
           outputs = outputs :+ output
+        case _ =>
+          outputs = outputs :+ line
       }
     }else {
       outputs = outputs :+ line
     }
   }
 
-  messages.foreach(println)
-  println("\n\n")
-  outputs.foreach(println)
+  val messagesFile = s"$outputPrefix.messages"
+  val messageOutput = new PrintWriter(new File(messagesFile))
+  messages.foreach{ case (key, value) => messageOutput.println(s"$key = ${value.trim()}")}
+  messageOutput.close()
+  println(s"messages file written to $messagesFile")
+
+  val twirlTemplateFile = s"$outputPrefix.messages.scala.html"
+  val twirlTemplateOutput = new PrintWriter(new File(twirlTemplateFile))
+  outputs.foreach( line => twirlTemplateOutput.println(s"$line"))
+  twirlTemplateOutput.close()
+  println(s"twirlTemplate file written to $twirlTemplateFile")
 }
