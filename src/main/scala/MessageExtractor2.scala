@@ -1,4 +1,4 @@
-import MessagesExtractor.{args, currentTag, messages, output, outputPrefix, path, rootKey, sequence, tagSequence}
+import MessagesExtractor.{args, currentTag, endTag, message, messages, output, outputPrefix, path, rootKey, sequence, tagSequence}
 
 import java.util.Scanner
 import java.nio.file.Path
@@ -78,33 +78,45 @@ object MessageExtractor2 extends App{
 
   }
 
-  def processLine(line: String, pkey: String): Option[((String, String), String)] = {
+  def processLine(line: String, pkey: String): (ListMap[String, String], List[String]) = {
     val m1 = contentPattern.findFirstMatchIn(line.trim())
+    val m2 = startTagPattern.findFirstMatchIn(line.trim())
 
-    m1 match {
-      case Some(m) =>
+    (m1, m2) match {
+      case (None, Some(_)) =>
+        ListMap.empty[String, String] -> List.empty[String]
+      case (Some(m), Some(_)) =>
         val tag = Tag(m.group(1), line)
-        val substitutionSeq = sequence()
 
         if(!tagSequence.contains(tag.value)) {
           tagSequence = tagSequence + (tag.value -> sequence())
         }
-        var content = extractContent(tag.value, line)
-        val children = extractChildren(content)
 
+        val key = s"$pkey.${tag.value}.${tagSequence(tag.value)()}"
+        val content = extractContent(tag.value, line)
+        val children: Seq[(ListMap[String, String], List[String])] = extractChildren(content).map{ child =>
+          processLine(child, key)
+        }
 
-        val expressions =  (for( m <- expressionPattern.findAllMatchIn(content)) yield {
-          val expression = m.group(1)
-          content = content.replace(expression, s"{${substitutionSeq()}}")
-          expression.replace("@", "")
-        }).toSeq
+        val substitutionSeq = sequence()
 
+        val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
 
+        val expressions = statements.filter{ statements => statements.contains("<") || statements.contains("@")}.flatMap{ content =>
+          val expressions = for( m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message")) yield m.group(1)
+          if(expressions.isEmpty) List(content) else expressions.toSeq
+        }
 
-        val key = s"$rootKey.${tag.value}.${tagSequence(tag.value)()}"
-        val args = expressions.foldLeft("")((acc, expression) => s"$acc, $expression")
-        Some(key -> content, tag.render(s"""@messages("$key"$args)"""))
-      case _ => None
+        var output = statements.mkString(" ")
+        for(expression <- expressions) {
+          output = output.replace(expression, s"{${substitutionSeq()}}")
+        }
+        val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
+
+        val args = expressions.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
+          messages -> List(tag.render(s"""@messages("$key"$args)"""))
+      case _ =>
+        (ListMap.empty[String, String], List(line))
     }
 
   }
@@ -120,10 +132,10 @@ object MessageExtractor2 extends App{
     val m1 = startTagPattern.findFirstMatchIn(line.trim)
 
     if(m1.isDefined) {
-      processLine(line, "") match {
-        case Some((message, output)) =>
-          messages = messages + message
-          outputs = outputs :+ output
+      processLine(line, rootKey) match {
+        case (message, output) if message.nonEmpty && output.nonEmpty =>
+          messages = messages ++ message
+          outputs = outputs :+ output.mkString("")
         case _ =>
           outputs = outputs :+ line
       }
