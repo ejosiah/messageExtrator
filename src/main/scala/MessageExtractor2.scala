@@ -40,6 +40,7 @@ object MessageExtractor2 extends App{
   val startTagPattern = "<([a-zA-z0-9]+).*>".r
   val contentPattern = "<([a-zA-z0-9]+).*>(.+)</([a-zA-z0-9]+)>".r
   val expressionPattern = "(@[a-zA-Z0-9.]+(\\(.*\\))*)".r
+  val expressionLinePattern = "^@.*".r
 
   val outputPrefix = filenameMatch.get.group(1)
   var messages = ListMap[String, String]()
@@ -98,23 +99,33 @@ object MessageExtractor2 extends App{
           processLine(child, key)
         }
 
-        val substitutionSeq = sequence()
+        if (expressionLinePattern.findFirstIn(content).isDefined) {
+           ListMap.empty[String, String] -> List(tag.render(content))
+        }else {
 
-        val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
+          val substitutionSeq = sequence()
 
-        val expressions = statements.filter{ statements => statements.contains("<") || statements.contains("@")}.flatMap{ content =>
-          val expressions = for( m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message")) yield m.group(1)
-          if(expressions.isEmpty) List(content) else expressions.toSeq
-        }
+          val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
 
-        var output = statements.mkString(" ")
-        for(expression <- expressions) {
-          output = output.replace(expression, s"{${substitutionSeq()}}")
-        }
-        val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
+          val expressions = statements.filter { statements => statements.contains("<") || statements.contains("@") }
 
-        val args = expressions.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
+           val expressions1 =  expressions.flatMap { content =>
+            val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
+              println(s"${m.group(0)} _ ${m.group(1)}")
+              m.group(1)
+            }).toSeq
+            if (expressions.isEmpty) List(content) else expressions.toSeq
+          }
+
+          var output = statements.mkString(" ")
+          for (expression <- expressions1) {
+            output = output.replace(expression, s"{${substitutionSeq()}}")
+          }
+          val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
+
+          val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
           messages -> List(tag.render(s"""@messages("$key"$args)"""))
+        }
       case _ =>
         (ListMap.empty[String, String], List(line))
     }
@@ -129,19 +140,14 @@ object MessageExtractor2 extends App{
   while(scanner.hasNext()) {
     val line = scanner.nextLine()
 
-    val m1 = startTagPattern.findFirstMatchIn(line.trim)
-
-    if(m1.isDefined) {
-      processLine(line, rootKey) match {
-        case (message, output) if message.nonEmpty && output.nonEmpty =>
-          messages = messages ++ message
-          outputs = outputs :+ output.mkString("")
-        case _ =>
-          outputs = outputs :+ line
-      }
-    }else {
-      outputs = outputs :+ line
+    processLine(line, rootKey) match {
+      case (message, output) if message.nonEmpty && output.nonEmpty =>
+        messages = messages ++ message
+        outputs = outputs :+ output.mkString("")
+      case _ =>
+        outputs = outputs :+ line
     }
+
   }
 
   val messagesFile = s"$outputPrefix.messages"
