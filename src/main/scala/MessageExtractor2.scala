@@ -107,24 +107,30 @@ object MessageExtractor2 extends App{
 
           val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
 
-          val expressions = statements.filter { statements => statements.contains("<") || statements.contains("@") }
+          if(statements.forall(_.startsWith("<"))) {
+            val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry)
+            messages -> List(tag.render(children.flatMap(_._2).mkString))
+          }else {
 
-           val expressions1 =  expressions.flatMap { content =>
-            val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
-              println(s"${m.group(0)} _ ${m.group(1)}")
-              m.group(1)
-            }).toSeq
-            if (expressions.isEmpty) List(content) else expressions.toSeq
+            val expressions = statements.filter { statements => statements.contains("<") || statements.contains("@") }
+
+            val expressions1 = expressions.flatMap { content =>
+              val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
+                println(s"${m.group(0)} _ ${m.group(1)}")
+                m.group(1)
+              }).toSeq
+              if (expressions.isEmpty) List(content) else expressions.toSeq
+            }
+
+            var output = statements.mkString(" ")
+            for (expression <- expressions1) {
+              output = output.replace(expression, s"{${substitutionSeq()}}")
+            }
+            val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
+
+            val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
+            messages -> List(tag.render(s"""@messages("$key"$args)"""))
           }
-
-          var output = statements.mkString(" ")
-          for (expression <- expressions1) {
-            output = output.replace(expression, s"{${substitutionSeq()}}")
-          }
-          val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
-
-          val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
-          messages -> List(tag.render(s"""@messages("$key"$args)"""))
         }
       case _ =>
         (ListMap.empty[String, String], List(line))
