@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.io.PrintWriter
 import java.io.File
+import scala.annotation.tailrec
 import scala.collection.immutable.ListMap
 import scala.util.matching.Regex.Match
 
@@ -38,9 +39,13 @@ object MessageExtractor2 extends App{
   }
 
   val startTagPattern = "<([a-zA-z0-9]+).*>".r
+  val inlineStartTagPattern = "^<([a-zA-z0-9]+).*>".r
+  val inlineEndTagPattern = "</([a-zA-z0-9]+)>$".r
   val contentPattern = "<([a-zA-z0-9]+).*>(.+)</([a-zA-z0-9]+)>".r
+  val inlineContentPattern = "^<([a-zA-z0-9]+).*>(.+)</([a-zA-z0-9]+)>".r
   val expressionPattern = "(@[a-zA-Z0-9.]+(\\(.*\\))*)".r
   val expressionLinePattern = "^@.*".r
+  def createEndTagPattern(tag: String) = s"</$tag>".r
 
   val outputPrefix = filenameMatch.get.group(1)
   var messages = ListMap[String, String]()
@@ -62,78 +67,90 @@ object MessageExtractor2 extends App{
     fullMatch.substring(startIndex, endIndex)
   }
 
-  def extractChildren(line: String, acc: List[String] = Nil): List[String] = {
+  @tailrec
+  def extractChildren(line: String, acc: List[String] = Nil, inTag: Boolean = false): List[String] = {
     if(line.isEmpty) acc
+    else if(inTag) {
+      val tag = startTagPattern.findFirstMatchIn(line).get.group(1)
+      val end = createEndTagPattern(tag).findFirstMatchIn(line).get.group(0)
+      val buffer = line.substring(0, line.indexOf(end)) + end
+      extractChildren(line.substring(buffer.length, line.length), acc :+ buffer)
+    }
     else {
-      val startIndex = line.indexOf("<")
-      if (startIndex == -1) {
-        acc :+ line
-      }else {
-        val tag = startTagPattern.findFirstMatchIn(line).get.group(1)
-        val endIndex = line.indexOf(s"/$tag>") + tag.length() + 2
-        val head = line.substring(startIndex, endIndex)
-        val tail = line.replace(head, "")
-        extractChildren(tail, acc :+ head)
-      }
+      val buffer = line.takeWhile(_ != '<')
+      val newLine = line.substring(buffer.length, line.length)
+      extractChildren(newLine, if(buffer.nonEmpty) acc :+ buffer else acc, newLine.startsWith("<"))
     }
 
   }
 
-  def processLine(line: String, pkey: String): (ListMap[String, String], List[String]) = {
-    val m1 = contentPattern.findFirstMatchIn(line.trim())
-    val m2 = startTagPattern.findFirstMatchIn(line.trim())
+  def renderContent(content: String, padding: String = "", mTag: Option[Tag] = None): String = {
+    mTag.fold(s"$padding$content")(tag => tag.render(content))
+  }
 
-    (m1, m2) match {
-      case (None, Some(_)) =>
-        ListMap.empty[String, String] -> List.empty[String]
-      case (Some(m), Some(_)) =>
+  def processContent(tag: Tag, pkey: String, line: String, render: String => String, parent: Option[Tag] = None): (ListMap[String, String], List[String], Option[Tag]) = {
+    if(!tagSequence.contains(tag.value)) {
+      tagSequence = tagSequence + (tag.value -> sequence())
+    }
+
+    val key = s"$pkey.${tag.value}.${tagSequence(tag.value)()}"
+    val content = if(parent.nonEmpty) line.trim else extractContent(tag.value, line)
+    val children = extractChildren(content).map{ child =>
+      processLine(child, key)
+    }
+
+    if (expressionLinePattern.findFirstIn(content).isDefined) {
+      (ListMap.empty[String, String], List(render(content)), parent)
+    }else {
+
+      val substitutionSeq = sequence()
+
+      val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
+
+      if(statements.forall(_.startsWith("<"))) {
+        val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry)
+        (messages , List(render(children.flatMap(_._2).mkString)), parent)
+      }else {
+
+        val expressions = statements.filter { statements => statements.contains("<") || statements.contains("@") }
+
+        val expressions1 = expressions.flatMap { content =>
+          val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
+            println(s"${m.group(0)} _ ${m.group(1)}")
+            m.group(1)
+          }).toSeq
+          if (expressions.isEmpty) List(content) else expressions.toSeq
+        }
+
+        var output = statements.mkString(" ")
+        for (expression <- expressions1) {
+          output = output.replace(expression, s"{${substitutionSeq()}}")
+        }
+        val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
+
+        val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
+        (messages, List(render(s"""@messages("$key"$args)""")), parent)
+      }
+    }
+  }
+
+  def processLine(line: String, pkey: String, parent: Option[Tag] = None): (ListMap[String, String], List[String], Option[Tag]) = {
+    // TODO reuse exiting messages
+    val m1 = inlineContentPattern.findFirstMatchIn(line.trim())
+    val m2 = inlineStartTagPattern.findFirstMatchIn(line.trim())
+    val m3 = inlineEndTagPattern.findFirstMatchIn(line.trim())
+
+    (m1, m2, m3, parent) match {
+      case (None, Some(_), _, _)   =>
+        (ListMap.empty[String, String] , List.empty[String], Some(Tag(m2.get.group(1), line)))
+      case (Some(m), Some(_), _, _) =>
         val tag = Tag(m.group(1), line)
-
-        if(!tagSequence.contains(tag.value)) {
-          tagSequence = tagSequence + (tag.value -> sequence())
-        }
-
-        val key = s"$pkey.${tag.value}.${tagSequence(tag.value)()}"
-        val content = extractContent(tag.value, line)
-        val children: Seq[(ListMap[String, String], List[String])] = extractChildren(content).map{ child =>
-          processLine(child, key)
-        }
-
-        if (expressionLinePattern.findFirstIn(content).isDefined) {
-           ListMap.empty[String, String] -> List(tag.render(content))
-        }else {
-
-          val substitutionSeq = sequence()
-
-          val statements: Seq[String] = children.map(_._2).foldLeft(List.empty[String])((acc, entry) => acc ++ entry)
-
-          if(statements.forall(_.startsWith("<"))) {
-            val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry)
-            messages -> List(tag.render(children.flatMap(_._2).mkString))
-          }else {
-
-            val expressions = statements.filter { statements => statements.contains("<") || statements.contains("@") }
-
-            val expressions1 = expressions.flatMap { content =>
-              val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
-                println(s"${m.group(0)} _ ${m.group(1)}")
-                m.group(1)
-              }).toSeq
-              if (expressions.isEmpty) List(content) else expressions.toSeq
-            }
-
-            var output = statements.mkString(" ")
-            for (expression <- expressions1) {
-              output = output.replace(expression, s"{${substitutionSeq()}}")
-            }
-            val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
-
-            val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
-            messages -> List(tag.render(s"""@messages("$key"$args)"""))
-          }
-        }
+        val render = renderContent(_, "", Some(tag))
+        processContent(tag, pkey, line, render)
+      case (_, _, None, Some(tag)) if line.trim.nonEmpty =>
+        processContent(tag, pkey, line, renderContent(_, line.replace(line.trim, "")), parent)
       case _ =>
-        (ListMap.empty[String, String], List(line))
+        (ListMap.empty[String, String], List(line), None)
     }
 
   }
@@ -142,16 +159,19 @@ object MessageExtractor2 extends App{
 
   val scanner = new Scanner(path)
 
+  var tag: Option[Tag] = None
 
   while(scanner.hasNext()) {
     val line = scanner.nextLine()
 
-    processLine(line, rootKey) match {
-      case (message, output) if message.nonEmpty && output.nonEmpty =>
+    processLine(line, rootKey, tag) match {
+      case (message, output, maybeTag) if message.nonEmpty && output.nonEmpty =>
         messages = messages ++ message
         outputs = outputs :+ output.mkString("")
-      case _ =>
+        tag = maybeTag
+      case (_, _, mayBeTag) =>
         outputs = outputs :+ line
+        tag = mayBeTag
     }
 
   }
