@@ -88,6 +88,31 @@ object MessageExtractor2 extends App{
     mTag.fold(s"$padding$content")(tag => tag.render(content))
   }
 
+  def format(key: String, expressions: Seq[String]): String = {
+    val newExpressions: Seq[String] = expressions.map{ expression =>
+      val m = contentPattern.findFirstMatchIn(expression)
+      if(m.isDefined) {
+         val content = m.get.group(2)
+        if(content.startsWith("@")) {
+          s"s\"\"\"${ expression.replace(content, s"$${ ${content.replace("@", "")} }")}\"\"\""
+        }else {
+          expression
+        }
+      }else {
+        expression
+      }
+    }
+
+    val args = newExpressions.foldLeft("")((acc, expression) => s"$acc, $expression")
+
+    val hasInnerHtml = newExpressions.exists(contentPattern.findFirstMatchIn(_).isDefined)
+    if(hasInnerHtml){
+      s"""@{ Html(messages("$key"$args)) }"""
+    }else {
+      s"""@messages("$key"$args)"""
+    }
+  }
+
   def processContent(tag: Tag, pkey: String, line: String, render: String => String, parent: Option[Tag] = None): (ListMap[String, String], List[String], Option[Tag]) = {
     if(!tagSequence.contains(tag.value)) {
       tagSequence = tagSequence + (tag.value -> sequence())
@@ -116,7 +141,6 @@ object MessageExtractor2 extends App{
 
         val expressions1 = expressions.flatMap { content =>
           val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
-            println(s"${m.group(0)} _ ${m.group(1)}")
             m.group(1)
           }).toSeq
           if (expressions.isEmpty) List(content) else expressions.toSeq
@@ -129,7 +153,7 @@ object MessageExtractor2 extends App{
         val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
 
         val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
-        (messages, List(render(s"""@messages("$key"$args)""")), parent)
+        (messages, List(render(format(key, expressions1))), parent)
       }
     }
   }
