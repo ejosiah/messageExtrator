@@ -145,8 +145,7 @@ object MessageExtractor2 extends App{
         (ListMap.empty[String, String] , List.empty[String], Some(Tag(m2.get.group(1), line)))
       case (Some(m), Some(_), _, _) =>
         val tag = Tag(m.group(1), line)
-        val render = renderContent(_, "", Some(tag))
-        processContent(tag, pkey, line, render)
+        processContent(tag, pkey, line, renderContent(_, "", Some(tag)))
       case (_, _, None, Some(tag)) if line.trim.nonEmpty =>
         processContent(tag, pkey, line, renderContent(_, line.replace(line.trim, "")), parent)
       case _ =>
