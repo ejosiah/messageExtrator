@@ -1,5 +1,6 @@
 import MessagesExtractor.{args, currentTag, endTag, message, messages, output, outputPrefix, path, rootKey, sequence, tagSequence}
 
+import java.beans.Expression
 import java.util.Scanner
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -88,21 +89,22 @@ object MessageExtractor2 extends App{
     mTag.fold(s"$padding$content")(tag => tag.render(content))
   }
 
-  def format(key: String, expressions: Seq[String]): String = {
-    val newExpressions: Seq[String] = expressions.map{ expression =>
-      val m = contentPattern.findFirstMatchIn(expression)
-      if(m.isDefined) {
-         val content = m.get.group(2)
-        if(content.startsWith("@")) {
-          s"s\"\"\"${ expression.replace(content, s"$${ ${content.replace("@", "")} }")}\"\"\""
-        }else {
-          expression
-        }
+  def format(expression: String): String = {
+    val m = contentPattern.findFirstMatchIn(expression)
+    if(m.isDefined) {
+      val content = m.get.group(2)
+      if(content.startsWith("@")) {
+        s"s\"\"\"${ expression.replace(content, s"$${ ${content.replace("@", "")} }")}\"\"\""
       }else {
         expression
       }
+    }else {
+      expression
     }
+  }
 
+  def format(key: String, expressions: Seq[String]): String = {
+    val newExpressions = expressions.map(format)
     val args = newExpressions.foldLeft("")((acc, expression) => s"$acc, $expression")
 
     val hasInnerHtml = newExpressions.exists(contentPattern.findFirstMatchIn(_).isDefined)
@@ -143,7 +145,7 @@ object MessageExtractor2 extends App{
           val expressions = (for (m <- expressionPattern.findAllMatchIn(content) if !m.group(1).contains("message") && !content.contains("<")) yield {
             m.group(1)
           }).toSeq
-          if (expressions.isEmpty) List(content) else expressions.toSeq
+          if (expressions.isEmpty) List(content) else expressions
         }
 
         var output = statements.mkString(" ")
@@ -152,7 +154,6 @@ object MessageExtractor2 extends App{
         }
         val messages = children.map(_._1).foldLeft(ListMap.empty[String, String])((acc, entry) => acc ++ entry) + (key -> output)
 
-        val args = expressions1.foldLeft("")((acc, expression) => s"$acc, ${expression.replace("@", "")}")
         (messages, List(render(format(key, expressions1))), parent)
       }
     }
@@ -177,7 +178,6 @@ object MessageExtractor2 extends App{
     }
 
   }
-
   var tagSequence: Map[String, () => Int ] = Map()
 
   val scanner = new Scanner(path)
