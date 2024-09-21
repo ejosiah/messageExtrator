@@ -60,6 +60,17 @@ object MessageExtractor2 extends App{
     }
   }
 
+  class TagSequence {
+    private var memory = Map[String, () => Int ]()
+
+    def apply(tag: String): Int = {
+      if(!memory.contains(tag)){
+        memory = memory + (tag -> sequence())
+      }
+      memory(tag)()
+    }
+  }
+
   def extractContent(tag: String, line: String): String = {
     val fullMatch = line
     val startIndex = fullMatch.indexOf(s">") + 1
@@ -115,15 +126,12 @@ object MessageExtractor2 extends App{
     }
   }
 
-  def processContent(tag: Tag, pkey: String, line: String, render: String => String, parent: Option[Tag] = None): (ListMap[String, String], List[String], Option[Tag]) = {
-    if(!tagSequence.contains(tag.value)) {
-      tagSequence = tagSequence + (tag.value -> sequence())
-    }
-
-    val key = s"$pkey.${tag.value}.${tagSequence(tag.value)()}"
+  def processContent(tag: Tag, pkey: String, line: String, render: String => String, parent: Option[Tag] = None)(tagSequence: TagSequence): (ListMap[String, String], List[String], Option[Tag]) = {
+    val key = s"$pkey.${tag.value}.${tagSequence(tag.value)}"
     val content = if(parent.nonEmpty) line.trim else extractContent(tag.value, line)
+    val childSequence = new TagSequence
     val children = extractChildren(content).map{ child =>
-      processLine(child, key)
+      processLine(child, key)(childSequence)
     }
 
     if (expressionLinePattern.findFirstIn(content).isDefined) {
@@ -159,7 +167,7 @@ object MessageExtractor2 extends App{
     }
   }
 
-  def processLine(line: String, pkey: String, parent: Option[Tag] = None): (ListMap[String, String], List[String], Option[Tag]) = {
+  def processLine(line: String, pkey: String, parent: Option[Tag] = None)(tagSequence: TagSequence): (ListMap[String, String], List[String], Option[Tag]) = {
     // TODO reuse exiting messages
     val m1 = inlineContentPattern.findFirstMatchIn(line.trim())
     val m2 = inlineStartTagPattern.findFirstMatchIn(line.trim())
@@ -168,26 +176,26 @@ object MessageExtractor2 extends App{
     (m1, m2, m3, parent) match {
       case (None, Some(_), _, _)   =>
         (ListMap.empty[String, String] , List.empty[String], Some(Tag(m2.get.group(1), line)))
+      case (_, _, None, Some(tag)) if line.trim.nonEmpty =>
+        processContent(tag, pkey, line, renderContent(_, line.replace(line.trim, "")), parent)(tagSequence)
       case (Some(m), Some(_), _, _) =>
         val tag = Tag(m.group(1), line)
-        processContent(tag, pkey, line, renderContent(_, "", Some(tag)))
-      case (_, _, None, Some(tag)) if line.trim.nonEmpty =>
-        processContent(tag, pkey, line, renderContent(_, line.replace(line.trim, "")), parent)
+        processContent(tag, pkey, line, renderContent(_, "", Some(tag)))(tagSequence)
       case _ =>
         (ListMap.empty[String, String], List(line), None)
     }
 
   }
-  var tagSequence: Map[String, () => Int ] = Map()
 
   val scanner = new Scanner(path)
+  val tagSequence = new TagSequence
 
   var tag: Option[Tag] = None
 
   while(scanner.hasNext()) {
     val line = scanner.nextLine()
 
-    processLine(line, rootKey, tag) match {
+    processLine(line, rootKey, tag)(tagSequence) match {
       case (message, output, maybeTag) if message.nonEmpty && output.nonEmpty =>
         messages = messages ++ message
         outputs = outputs :+ output.mkString("")
